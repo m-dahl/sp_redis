@@ -33,14 +33,15 @@ local transitions = {
    },
 }
 
-local function take_transition(enabled)
-   for i, t in ipairs(transitions) do
+local function take_transitions(enabled)
+   local fired = {}
+   for _, t in ipairs(transitions) do
       if enabled[t.name] and t.guard() then
          t.action()
-         return t.name
+         table.insert(fired, t.name)
       end
    end
-   return nil
+   return fired
 end
 
 local function get_redis_json(key, default)
@@ -65,34 +66,32 @@ local function set_redis_state()
 end
 
 local function tick()
-   local start = redis.call('TIME')
+   local time = redis.call('TIME')
 
    get_redis_state()
 
    -- fetch the enabled transitions.
    local l = redis.call('smembers', 'sp/enabled')
    local enabled = {}
-   for i, e in ipairs(l) do enabled[e] = true end
+   for _, e in ipairs(l) do enabled[e] = true end
 
-   local fired = take_transition(enabled)
-   if fired then
-      redis.call('lpush', 'sp/fired', fired)
-      redis.call('ltrim', 'sp/fired', 0, 999)
-   end
+   local fired = take_transitions(enabled)
+   local info = {
+      fired = fired,
+      time = time,
+   }
+   redis.call('lpush', 'sp/fired', cjson.encode(info))
+   redis.call('ltrim', 'sp/fired', 0, 999)
 
    set_redis_state()
 
-   local finish = redis.call('TIME')
-   -- due to this change, measuring time currently does not work.
-   -- https://github.com/redis/redis/issues/12699
-   local finish = (finish[1]-start[1])*1000000+(finish[2]-start[2])
-   return { fired, finish }
+   return info
 end
 
 -- set up some initial state
 local function set_initial_state()
    -- enable all transitions initially
-   for i, t in ipairs(transitions) do
+   for _, t in ipairs(transitions) do
       redis.call('sadd', 'sp/enabled', t.name)
    end
 
