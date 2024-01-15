@@ -10,9 +10,9 @@ docker build -t sp_redis .
 # Start redis server
 docker run -v ./src:/src --name sp_redis -p 6379:6379 -p 8001:8001 sp_redis
 
-# Load runner lua function
+# Load runner lua function and initialize runner state.
 docker exec -it sp_redis /bin/bash
-cat /src/runner.lua | redis-cli -x FUNCTION LOAD REPLACE
+cat /src/runner.lua | redis-cli -x FUNCTION LOAD REPLACE && redis-cli FCALL set_initial_state 0
 exit
 
 # Start a ticker (tick every 100ms)

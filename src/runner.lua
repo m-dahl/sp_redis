@@ -33,9 +33,9 @@ local transitions = {
    },
 }
 
-local function take_transition()
+local function take_transition(enabled)
    for i, t in ipairs(transitions) do
-      if t.guard() then
+      if enabled[t.name] and t.guard() then
          t.action()
          return t.name
       end
@@ -69,7 +69,12 @@ local function tick()
 
    get_redis_state()
 
-   local fired = take_transition()
+   -- fetch the enabled transitions.
+   local l = redis.call('smembers', 'sp/enabled')
+   local enabled = {}
+   for i, e in ipairs(l) do enabled[e] = true end
+
+   local fired = take_transition(enabled)
    if fired then
       redis.call('lpush', 'sp/fired', fired)
       redis.call('ltrim', 'sp/fired', 0, 999)
@@ -84,6 +89,18 @@ local function tick()
    return { fired, finish }
 end
 
+-- set up some initial state
+local function set_initial_state()
+   -- enable all transitions initially
+   for i, t in ipairs(transitions) do
+      redis.call('sadd', 'sp/enabled', t.name)
+   end
+
+   -- create initial state/dummy resources
+   set_redis_state()
+end
+
 redis.register_function('tick', tick)
 redis.register_function('get_redis_state', get_redis_state)
 redis.register_function('set_redis_state', set_redis_state)
+redis.register_function('set_initial_state', set_initial_state)
