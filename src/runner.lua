@@ -9,48 +9,175 @@ local r = {}
 
 -- set up all operations etc in this function.
 local function init()
-   -- setup resources (for json get/set)
-   sp.resources = { "robot1", "robot2", "scratch" }
-
    -- setup initial states if the resources are not on redis already
-   r.robot1 = { active = false }
-   r.scratch = { counter = 0 }
+   r.scratch = r.scratch or { counter = 0 }
+   r.atr1 = r.atr1 or
+      {
+         position = "waiting",
+         has_kit = true,
+      }
+   r.atr2 = r.atr2 or
+      {
+         position = "pou",
+         has_kit = true,
+      }
+   r.atr3 = r.atr3 or
+      {
+         position = "kitting",
+         has_kit = false,
+      }
+   r.roles = r.roles or
+      {
+         waiting = "atr1",
+         pou = "atr2",
+         kitting = "atr3",
+      }
 
-   -- add operations
-   sp.add_operation {
-      name = "r1_op1",
+   -- control logic
 
-      -- can always start
-      start_guard = function (state) return not r.robot1.active end,
-      start_action = function (state)
-         r.robot1.active = true
-         state.started_at = sp.now
-      end,
+   -- We can have operations as well as plain functions.
+   sp.add_function("counter",
+                   function()
+                      r.scratch.counter = r.scratch.counter + 1
+                   end
+   )
 
-      -- finishes after five seconds.
-      finish_guard = function (state) return sp.now > state.started_at + 5000 end,
-      finish_action = function (state)
-         state.result = "success"
-         state.started_at = nil
-      end,
+   -- For demonstration operations just sleep a bit before finishing.
+   local dummy_time = 5000
 
-      -- reset action
-      reset_guard = function (state) return true end,
-      reset_action = function (state)
-         state.result = nil
-      end
-   }
+   -- helpers
+   local function swap_roles()
+      r.roles = {
+         kitting = r.roles.pou,
+         pou = r.roles.waiting,
+         waiting = r.roles.kitting
+      }
+   end
 
-   -- Only has a start transition, not an operation.
-   sp.add_operation {
-      name = "counter",
+   -- Main control code. Straight port of coordinator.rs. No blocking stuff.
+   sp.add_function("controller",
+                   function()
+                      local kitting = r[r.roles.kitting] -- pointers
+                      local waiting = r[r.roles.waiting]
+                      local pou = r[r.roles.pou]
 
-      -- can always start
-      start_guard = function (state) return true end,
-      start_action = function (state)
-         r.scratch.counter = r.scratch.counter + 1
-      end,
-   }
+                      if not kitting.operation and kitting.position ~= "kitting" then
+                         local op_name = r.roles.kitting .. "_goto_kitting"
+                         sp.add_operation {
+                            name = op_name,
+
+                            -- guard includes waitings position.
+                            start_guard = function (state) return waiting.position == "wp18" end,
+                            start_action = function (state)
+                               state.started_at = sp.now
+                               kitting.operation = op_name
+                            end,
+
+                            -- pretend to finish after some time
+                            finish_guard = function (state) return sp.now > state.started_at + dummy_time end,
+                            finish_action = function (state)
+                               kitting.operation = nil
+                               kitting.position = "kitting"
+                               -- remove this operation, we recreate it when we want to run it.
+                               sp.remove_operation(op_name)
+                            end,
+                         }
+                      end
+
+                      if not kitting.operation and kitting.position == "kitting" and not kitting.has_kit then
+                         local op_name = r.roles.kitting .. "_kitting_ack"
+                         sp.add_operation {
+                            name = op_name,
+
+                            start_guard = function (state) return true end,
+                            start_action = function (state)
+                               state.started_at = sp.now
+                               kitting.operation = op_name
+                            end,
+
+                            finish_guard = function (state) return sp.now > state.started_at + dummy_time end,
+                            finish_action = function (state)
+                               kitting.operation = nil
+                               kitting.has_kit = true
+                               sp.remove_operation(op_name)
+                            end,
+                         }
+                      end
+
+                      if not waiting.operation
+                         and waiting.position ~= "wp18"
+                         and waiting.position ~= "waiting" then
+                         local op_name = r.roles.waiting .. "_goto_wp18"
+                         sp.add_operation {
+                            name = op_name,
+
+                            start_guard = function (state) return true end,
+                            start_action = function (state)
+                               state.started_at = sp.now
+                               waiting.operation = op_name
+                            end,
+
+                            finish_guard = function (state) return sp.now > state.started_at + dummy_time end,
+                            finish_action = function (state)
+                               waiting.operation = nil
+                               waiting.position = "wp18"
+                               -- remove this operation, we recreate it when we want to run it.
+                               sp.remove_operation(op_name)
+                            end,
+                         }
+                      end
+
+                      if not waiting.operation
+                         and waiting.position == "wp18" then
+                         local op_name = r.roles.waiting .. "_goto_waiting"
+                         sp.add_operation {
+                            name = op_name,
+
+                            -- guard includes kitting position. check
+                            -- wp17 etc... for simplicity here we
+                            -- check that kitting has moved all the
+                            -- way to the kitting wp
+                            start_guard = function (state) return kitting.position == "kitting" end,
+                            start_action = function (state)
+                               state.started_at = sp.now
+                               waiting.operation = op_name
+                            end,
+
+                            finish_guard = function (state) return sp.now > state.started_at + dummy_time end,
+                            finish_action = function (state)
+                               waiting.operation = nil
+                               waiting.position = "waiting"
+                               -- remove this operation, we recreate it when we want to run it.
+                               sp.remove_operation(op_name)
+                            end,
+                         }
+                      end
+
+                      if not pou.operation then
+                         local op_name = r.roles.pou .. "_pou_ack"
+                         sp.add_operation {
+                            name = op_name,
+
+                            start_guard = function (state) return true end,
+                            start_action = function (state)
+                               state.started_at = sp.now
+                               pou.operation = op_name
+                            end,
+
+                            finish_guard = function (state) return kitting.has_kit and sp.now > state.started_at + dummy_time end,
+                            finish_action = function (state)
+                               pou.operation = nil
+                               pou.has_kit = false -- remove the kit.
+                               -- remove this operation, we recreate it when we want to run it.
+                               sp.remove_operation(op_name)
+
+                               -- when we finish we also want to swap the roles.
+                               swap_roles()
+                            end,
+                         }
+                      end
+                   end
+   )
 end
 
 --
@@ -58,23 +185,23 @@ end
 --
 
 function sp.get_redis_state()
-   for _, key in ipairs(sp.resources or {}) do
-      local data = sp.get_redis_json(key)
+   for key, data in pairs(r or {}) do
+      local upd_data = sp.get_redis_json(key, data)
       r[key] = data
    end
 
    -- read operation state
    local op_states = sp.get_redis_json('sp/operations')
    for op_name, op_state in pairs(op_states) do
-      if sp.operations[op_name] ~= nil then
+      if sp.operations and sp.operations[op_name] then
             sp.operations[op_name].state = op_state
       end
    end
 end
 
 function sp.set_redis_state()
-   for _, key in ipairs(sp.resources or {}) do
-      sp.set_redis_json(key, r[key])
+   for key, data in pairs(r or {}) do
+      sp.set_redis_json(key, data)
    end
 
    -- write sp internal state
@@ -117,7 +244,14 @@ end
 
 sp.take_transitions = function ()
    local fired = {}
-   for name, o in pairs(sp.operations) do
+
+   -- run functions
+   for _, f in pairs(sp.functions or {}) do
+      f()
+   end
+
+   -- run operations
+   for name, o in pairs(sp.operations or {}) do
       if o.state.state == "i" and o.start_guard(o.state) then
          o.state.state = "e"
          o.start_action(o.state)
@@ -136,7 +270,12 @@ sp.take_transitions = function ()
    return fired
 end
 
-sp.add_operation = function (o)
+function sp.add_function(name, f)
+   sp.functions = sp.functions or {}
+   sp.functions[name] = f
+end
+
+function sp.add_operation(o)
    local o = o or {}
    o.state = { state = "i" }
    o.start_guard = o.start_guard or function (state) return false end
@@ -145,11 +284,15 @@ sp.add_operation = function (o)
    o.finish_guard = o.finish_guard or function (state) return true end
    o.finish_action = o.finish_action or function (state) end
 
-   o.reset_guard = o.reset_guard or function (state) return true end
+   o.reset_guard = o.reset_guard or function (state) return false end
    o.reset_action = o.reset_action or function (state) end
 
    sp.operations = sp.operations or {}
    sp.operations[o.name] = o
+end
+
+function sp.remove_operation(name)
+   sp.operations[name] = nil
 end
 
 sp.get_redis_json = function(key, default)
