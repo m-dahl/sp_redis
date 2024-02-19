@@ -9,6 +9,38 @@ local sp = {
 -- named r to make guards shorter...
 local r = {}
 
+-- some random definitions we need
+-- redefines some agv positions from ARIAC to axelline
+local location_to_name = {
+   [0] = 'pou',      -- conveyor
+   [1] = 'waiting',  -- station 1
+   [2] = 'wp18',     -- station 2
+   [3] = 'kitting',  -- depot
+   [99] = 'unknown', -- moving
+}
+
+local atr_to_agv = {
+   atr1 = 'agv1',
+   atr2 = 'agv2',
+   atr3 = 'agv3',
+}
+
+local agv_to_atr = {
+   agv1 = 'atr1',
+   agv2 = 'atr2',
+   agv3 = 'atr3',
+}
+
+local function table_invert(t)
+   local s={}
+   for k,v in pairs(t) do
+     s[v]=k
+   end
+   return s
+end
+
+local name_to_location = {}
+
 -- helper functions
 local function kitting()
    return r[r.roles.kitting]
@@ -24,7 +56,10 @@ end
 
 -- set up all operations etc in this function.
 local function init()
+   name_to_location = table_invert(location_to_name)
+
    -- setup initial states if the resources are not on redis already
+
    r.scratch = { counter = 0 }
    r.atr1 = r.atr1 or
       {
@@ -47,6 +82,11 @@ local function init()
          pou = "atr2",
          kitting = "atr3",
       }
+
+   -- inputs
+   r['agv1/state'] = {}
+   r['agv2/state'] = {}
+   r['agv3/state'] = {}
 
    -- control logic
 
@@ -86,11 +126,22 @@ local function init()
                             start_guard = function (state) return waiting().position == "wp18" end,
                             start_action = function (state)
                                state.started_at = sp.now
+
+                               local ariac_agv_name = atr_to_agv[r.roles.kitting]
+                               local key = ariac_agv_name .. "/goal"
+                               local value = name_to_location['kitting']
+                               r[key] = value
+
                                kitting().operation = op_name
                             end,
 
                             -- pretend to finish after some time
-                            finish_guard = function (state) return sp.now > state.started_at + dummy_time end,
+                            finish_guard = function (state)
+                               local ariac_agv_name = atr_to_agv[r.roles.kitting]
+                               local key = ariac_agv_name .. "/state"
+                               local loc = r[key].location
+                               return location_to_name[loc] == 'kitting'
+                            end,
                             finish_action = function (state)
                                kitting().operation = nil
                                kitting().position = "kitting"
@@ -131,10 +182,21 @@ local function init()
                             start_guard = function (state) return true end,
                             start_action = function (state)
                                state.started_at = sp.now
+
+                               local ariac_agv_name = atr_to_agv[r.roles.waiting]
+                               local key = ariac_agv_name .. "/goal"
+                               local value = name_to_location['wp18']
+                               r[key] = value
+
                                waiting().operation = op_name
                             end,
 
-                            finish_guard = function (state) return sp.now > state.started_at + dummy_time end,
+                            finish_guard = function (state)
+                               local ariac_agv_name = atr_to_agv[r.roles.waiting]
+                               local key = ariac_agv_name .. "/state"
+                               local loc = r[key].location
+                               return location_to_name[loc] == 'wp18'
+                            end,
                             finish_action = function (state)
                                waiting().operation = nil
                                waiting().position = "wp18"
@@ -157,10 +219,21 @@ local function init()
                             start_guard = function (state) return kitting().position == "kitting" end,
                             start_action = function (state)
                                state.started_at = sp.now
+
+                               local ariac_agv_name = atr_to_agv[r.roles.waiting]
+                               local key = ariac_agv_name .. "/goal"
+                               local value = name_to_location['waiting']
+                               r[key] = value
+
                                waiting().operation = op_name
                             end,
 
-                            finish_guard = function (state) return sp.now > state.started_at + dummy_time end,
+                            finish_guard = function (state)
+                               local ariac_agv_name = atr_to_agv[r.roles.waiting]
+                               local key = ariac_agv_name .. "/state"
+                               local loc = r[key].location
+                               return location_to_name[loc] == 'waiting'
+                            end,
                             finish_action = function (state)
                                waiting().operation = nil
                                waiting().position = "waiting"
@@ -181,7 +254,7 @@ local function init()
                                pou().operation = op_name
                             end,
 
-                            finish_guard = function (state) return kitting().has_kit and sp.now > state.started_at + dummy_time end,
+                            finish_guard = function (state) return waiting().position == "waiting" and kitting().has_kit and sp.now > state.started_at + dummy_time end,
                             finish_action = function (state)
                                pou().operation = nil
                                pou().has_kit = false -- remove the kit.
